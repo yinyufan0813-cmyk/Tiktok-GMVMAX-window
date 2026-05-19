@@ -4,9 +4,9 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
+const PREFIX = "GMVMAX-WIN";
 
 const DEFAULT_CONFIG = {
   url: "",
@@ -24,6 +24,7 @@ const DEFAULT_CONFIG = {
   },
   selectors: {
     planRows: "",
+    account: "",
     planName: "",
     newSpend: "",
     newOrderAmount: "",
@@ -62,9 +63,9 @@ async function main() {
   }
 
   const page = await findTargetPage(browserSession, config);
-  console.log(`[GMVMAX-WIN] Attached tab: ${await page.title()} | ${page.url()}`);
-  console.log(`[GMVMAX-WIN] Started. Refresh interval: ${config.intervalMinutes} minute(s).`);
-  console.log("[GMVMAX-WIN] Keep the Chrome debugging window and TikTok GMV Max tab open.");
+  console.log(`[${PREFIX}] Attached tab: ${await page.title()} | ${page.url()}`);
+  console.log(`[${PREFIX}] Started. Refresh interval: ${config.intervalMinutes} minute(s).`);
+  console.log(`[${PREFIX}] Keep the Chrome debugging window and TikTok GMV Max login valid.`);
 
   do {
     await collectOnce(page, config, outputDir);
@@ -93,14 +94,8 @@ function mergeConfig(base, override) {
     ...base,
     ...override,
     url: envUrl || override.url || base.url,
-    tabMatch: {
-      ...base.tabMatch,
-      ...(override.tabMatch || {})
-    },
-    selectors: {
-      ...base.selectors,
-      ...(override.selectors || {})
-    }
+    tabMatch: { ...base.tabMatch, ...(override.tabMatch || {}) },
+    selectors: { ...base.selectors, ...(override.selectors || {}) }
   };
 }
 
@@ -121,42 +116,29 @@ async function getBrowserSession(config) {
       args: ["--disable-blink-features=AutomationControlled"]
     });
     const page = context.pages()[0] ?? (await context.newPage());
-    if (config.url) {
-      await page.goto(config.url, { waitUntil: "domcontentloaded", timeout: 90_000 });
-    }
+    if (config.url) await page.goto(refreshDashboardUrl(config.url) || config.url, { waitUntil: "domcontentloaded", timeout: 90_000 });
     return {
-      kind: "playwright",
       pages: async () => context.pages(),
-      connectPage: async (page) => page,
+      connectPage: async (pageTarget) => pageTarget,
       close: () => context.close()
     };
   }
 
-  try {
-    const targets = await fetchCdpTargets(config.cdpEndpoint);
-    return {
-      kind: "cdp",
-      pages: async () => targets.filter((target) => target.type === "page").map((target) => new CdpPageTarget(config.cdpEndpoint, target)),
-      connectPage: async (target) => CdpPage.connect(target),
-      close: async () => {}
-    };
-  } catch (error) {
-    throw new Error(
-      [
-        `Cannot connect to Chrome at ${config.cdpEndpoint}.`,
-        "On Windows 11, run this first:",
-        "npm run start:chrome",
-        "Then open the TikTok GMV Max page in that Chrome window and complete login.",
-        `Original error: ${error.message}`
-      ].join("\n")
-    );
-  }
+  return {
+    pages: async () => {
+      const targets = await fetchCdpTargets(config.cdpEndpoint);
+      return targets.filter((target) => target.type === "page").map((target) => new CdpPageTarget(config.cdpEndpoint, target));
+    },
+    connectPage: async (target) => CdpPage.connect(target),
+    openTarget: async (url) => openCdpTarget(config.cdpEndpoint, url),
+    close: async () => {}
+  };
 }
 
 async function printOpenTabs(browserSession) {
   const pages = await browserSession.pages();
   if (pages.length === 0) {
-    console.log("[GMVMAX-WIN] No open pages found.");
+    console.log(`[${PREFIX}] No open pages found.`);
     return;
   }
   for (const [index, page] of pages.entries()) {
@@ -165,27 +147,46 @@ async function printOpenTabs(browserSession) {
 }
 
 async function findTargetPage(browserSession, config) {
-  const pages = (await browserSession.pages()).filter((page) => isInspectablePage(page));
+  let pages = (await browserSession.pages()).filter(isInspectablePage);
+  if (pages.length === 0 && config.url && browserSession.openTarget) {
+    console.log(`[${PREFIX}] No inspectable tabs found. Opening configured GMV Max URL...`);
+    await browserSession.openTarget(refreshDashboardUrl(config.url) || config.url);
+    await wait(5000);
+    pages = (await browserSession.pages()).filter(isInspectablePage);
+  }
   if (pages.length === 0) throw new Error("No inspectable Chrome tabs found.");
 
+  let scored = await scorePages(pages, config);
+  scored.sort((a, b) => b.score - a.score);
+  let best = scored[0];
+  if ((!best || best.score <= 0) && config.url && browserSession.openTarget) {
+    console.log(`[${PREFIX}] Could not find the GMV Max live tab. Opening configured URL...`);
+    await browserSession.openTarget(refreshDashboardUrl(config.url) || config.url);
+    await wait(5000);
+    pages = (await browserSession.pages()).filter(isInspectablePage);
+    scored = await scorePages(pages, config);
+    scored.sort((a, b) => b.score - a.score);
+    best = scored[0];
+  }
+  if (!best || best.score <= 0) {
+    const tabList = scored.map((item, index) => `[${index + 1}] ${item.title} | ${item.url}`).join("\n");
+    throw new Error(`Could not find the TikTok GMV Max tab. Open tabs:\n${tabList}`);
+  }
+  if (isTikTokLoginPage(best.url)) throw new Error("Found the TikTok Ads login tab. Complete login in Chrome first, then run the monitor again.");
+
+  const page = await browserSession.connectPage(best.page);
+  await page.bringToFront().catch(() => {});
+  return page;
+}
+
+async function scorePages(pages, config) {
   const scored = [];
   for (const page of pages) {
     const title = await safeTitle(page);
     const url = page.url();
     scored.push({ page, title, url, score: scorePage({ title, url }, config) });
   }
-  scored.sort((a, b) => b.score - a.score);
-  const best = scored[0];
-  if (!best || best.score <= 0) {
-    const tabList = scored.map((item, index) => `[${index + 1}] ${item.title} | ${item.url}`).join("\n");
-    throw new Error(`Could not find the TikTok GMV Max tab. Open tabs:\n${tabList}`);
-  }
-  if (isTikTokLoginPage(best.url)) {
-    throw new Error("Found the TikTok Ads login tab. Complete login in Chrome first, then run the monitor again.");
-  }
-  const page = await browserSession.connectPage(best.page);
-  await page.bringToFront().catch(() => {});
-  return page;
+  return scored;
 }
 
 function isInspectablePage(page) {
@@ -214,15 +215,34 @@ function safelyParseUrl(value) {
   try { return value ? new URL(value) : null; } catch { return null; }
 }
 
+function refreshDashboardUrl(currentUrl, fallbackUrl = "") {
+  const parsed = safelyParseUrl(currentUrl) || safelyParseUrl(fallbackUrl);
+  if (!parsed || parsed.host !== "ads.tiktok.com" || !parsed.pathname.includes("/gmv-max/dashboard")) return null;
+  const now = String(Date.now());
+  parsed.searchParams.set("is_refresh_page", "true");
+  parsed.searchParams.set("activated_tab_id", "2");
+  parsed.searchParams.set("type", "live");
+  parsed.searchParams.set("live_campaign_page", parsed.searchParams.get("live_campaign_page") || "1");
+  parsed.searchParams.set("live_campaign_page_size", parsed.searchParams.get("live_campaign_page_size") || "10");
+  parsed.searchParams.set("list_start_date", now);
+  parsed.searchParams.set("list_end_date", now);
+  return parsed.toString();
+}
+
 function isTikTokLoginPage(url) {
   const parsed = safelyParseUrl(url);
   return parsed?.host === "ads.tiktok.com" && parsed.pathname.includes("/login");
 }
 
 async function fetchCdpTargets(endpoint) {
-  const url = `${endpoint.replace(/\/$/, "")}/json/list`;
-  const response = await fetch(url);
+  const response = await fetch(`${endpoint.replace(/\/$/, "")}/json/list`);
   if (!response.ok) throw new Error(`Chrome DevTools returned ${response.status} ${response.statusText}`);
+  return response.json();
+}
+
+async function openCdpTarget(endpoint, targetUrl) {
+  const response = await fetch(`${endpoint.replace(/\/$/, "")}/json/new?${encodeURIComponent(targetUrl)}`, { method: "PUT" });
+  if (!response.ok) throw new Error(`Chrome DevTools could not open target: ${response.status} ${response.statusText}`);
   return response.json();
 }
 
@@ -274,6 +294,7 @@ class CdpPage {
   async title() { return (await this.evaluate(() => document.title)) || this.target.title || ""; }
   async bringToFront() { await this.command("Page.bringToFront"); }
   async reload() { await this.command("Page.reload", { ignoreCache: true }); await this.waitForTimeout(8000); }
+  async goto(url) { await this.command("Page.navigate", { url }); await this.waitForTimeout(8000); }
   async waitForTimeout(ms) { await wait(ms); }
   async evaluate(fn, arg) {
     const expression = `(${fn})(${JSON.stringify(arg)})`;
@@ -290,8 +311,16 @@ class CdpPage {
 
 async function collectOnce(page, config, outputDir) {
   const timestamp = new Date().toISOString();
-  console.log(`[GMVMAX-WIN] ${timestamp} refreshing dashboard...`);
-  await page.reload({ waitUntil: "networkidle", timeout: 120_000 });
+  console.log(`[${PREFIX}] ${timestamp} refreshing dashboard...`);
+
+  const targetUrl = refreshDashboardUrl(page.url(), config.url);
+  if (targetUrl) {
+    console.log(`[${PREFIX}] Navigating to current LIVE GMV Max window...`);
+    await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 120_000 }).catch(async () => page.goto(targetUrl));
+  } else {
+    await page.reload({ waitUntil: "networkidle", timeout: 120_000 });
+  }
+
   await acceptVisibleDialogs(page);
   await page.waitForTimeout(5000);
 
@@ -342,8 +371,7 @@ async function collectOnce(page, config, outputDir) {
 
     function parseNumber(value) {
       if (!value) return null;
-      const normalized = String(value).replace(/,/g, "");
-      const match = normalized.match(/-?\d+(?:\.\d+)?/);
+      const match = String(value).replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
       return match ? Number(match[0]) : null;
     }
 
@@ -388,7 +416,6 @@ async function collectOnce(page, config, outputDir) {
     const englishMetrics = englishOverviewMetrics(bodyText);
     const plans = extractBySelectors();
     const englishPlans = englishLivePlans(bodyText);
-    const parsedPlans = plans.length > 0 ? plans : englishPlans;
     return {
       url: location.href,
       title: document.title,
@@ -398,7 +425,7 @@ async function collectOnce(page, config, outputDir) {
         totalSpend: labelMetrics.totalSpend || englishMetrics.totalSpend,
         totalOrderAmount: labelMetrics.totalOrderAmount || englishMetrics.totalOrderAmount
       },
-      plans: parsedPlans,
+      plans: plans.length > 0 ? plans : englishPlans,
       bodyText
     };
   }, { labels: LABELS, selectors: config.selectors });
@@ -414,27 +441,24 @@ async function collectOnce(page, config, outputDir) {
     const safeStamp = timestamp.replace(/[:.]/g, "-");
     await fs.writeFile(path.join(outputDir, `debug-${safeStamp}.txt`), record.bodyText, "utf8");
     await page.screenshot({ path: path.join(outputDir, `debug-${safeStamp}.png`), fullPage: true });
-    console.warn(`[GMVMAX-WIN] Some metrics were not found: ${missing.map(([key]) => key).join(", ")}`);
-    console.warn("[GMVMAX-WIN] Saved debug text and screenshot in logs/. Add CSS selectors in config.json if needed.");
+    console.warn(`[${PREFIX}] Some metrics were not found: ${missing.map(([key]) => key).join(", ")}`);
+    console.warn(`[${PREFIX}] Saved debug text and screenshot in logs/. Add CSS selectors in config.json if needed.`);
   }
-  console.log(`[GMVMAX-WIN] Saved: ${JSON.stringify(result.liveGmvMax)}`);
+  console.log(`[${PREFIX}] Saved: ${JSON.stringify(result.liveGmvMax)}`);
 }
 
 async function enrichPlanIncrements(historyPath, result) {
   const previous = await readLatestRecordWithPlans(historyPath);
-  const previousByAccount = new Map((previous?.plans || []).filter((plan) => plan.account).map((plan) => [plan.account, plan]));
+  const previousByKey = new Map((previous?.plans || []).map((plan) => [plan.account || plan.name, plan]));
   for (const plan of result.plans || []) {
-    const key = plan.account || plan.name;
-    const previousPlan = previousByAccount.get(key) || (previous?.plans || []).find((item) => (item.account || item.name) === key);
+    const previousPlan = previousByKey.get(plan.account || plan.name);
     const spendIncrease = previousPlan ? parseMoney(plan.totalSpend) - parseMoney(previousPlan.totalSpend) : 0;
     const orderAmountIncrease = previousPlan ? parseMoney(plan.totalOrderAmount) - parseMoney(previousPlan.totalOrderAmount) : 0;
     plan.intervalSpendIncrease = moneyText(Math.max(0, spendIncrease));
     plan.intervalOrderAmountIncrease = moneyText(Math.max(0, orderAmountIncrease));
   }
-  const intervalSpend = (result.plans || []).reduce((sum, plan) => sum + parseMoney(plan.intervalSpendIncrease), 0);
-  const intervalOrderAmount = (result.plans || []).reduce((sum, plan) => sum + parseMoney(plan.intervalOrderAmountIncrease), 0);
-  result.liveGmvMax.newSpend = moneyText(intervalSpend);
-  result.liveGmvMax.newOrderAmount = moneyText(intervalOrderAmount);
+  result.liveGmvMax.newSpend = moneyText((result.plans || []).reduce((sum, plan) => sum + parseMoney(plan.intervalSpendIncrease), 0));
+  result.liveGmvMax.newOrderAmount = moneyText((result.plans || []).reduce((sum, plan) => sum + parseMoney(plan.intervalOrderAmountIncrease), 0));
 }
 
 async function readLatestRecordWithPlans(filePath) {
