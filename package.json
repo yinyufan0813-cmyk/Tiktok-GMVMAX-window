@@ -1,0 +1,23 @@
+{
+  "name": "tiktok-gmvmax-monitor-windows",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Windows 11 version of TikTok Shop LIVE GMV Max monitor.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/monitor.js",
+    "once": "node src/monitor.js --once",
+    "list-tabs": "node src/monitor.js --list-tabs",
+    "start:chrome": "powershell -ExecutionPolicy Bypass -File scripts/start-chrome-win.ps1",
+    "float": "python scripts/gmvmax_float.py",
+    "register-startup": "powershell -ExecutionPolicy Bypass -File scripts/register-startup-task.ps1",
+    "unregister-startup": "powershell -ExecutionPolicy Bypass -File scripts/unregister-startup-task.ps1",
+    "install:browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.53.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
