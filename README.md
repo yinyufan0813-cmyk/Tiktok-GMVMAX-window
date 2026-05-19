@@ -20,7 +20,7 @@
 
 1. Google Chrome
 2. Node.js 18 或以上版本
-3. Python 3，可选，仅用于悬浮窗
+3. Python 3，可选，仅用于备用 Tk 悬浮窗
 
 检查 Node.js：
 
@@ -106,7 +106,31 @@ npm start
 "intervalMinutes": 10
 ```
 
-## 悬浮窗
+## 屏幕面板
+
+推荐使用 HTML 面板，三行显示三个账号的数据，包含新增消耗、新增成交、新增 ROI、总消耗、总成交和总 ROI，并显示相对上一轮数据的 `▲` / `▼` / `→`。
+
+启动方式：
+
+```powershell
+npm run dashboard
+```
+
+或者双击：
+
+```text
+scripts\start-dashboard-win.bat
+```
+
+面板会启动本地服务：
+
+```text
+http://127.0.0.1:8787/dashboard.html
+```
+
+页面每 30 秒读取一次 `logs/gmvmax-plan-records.csv`，右上角会显示带日期的最新更新时间。
+
+## 备用 Tk 悬浮窗
 
 如果已安装 Python 3，可以运行：
 
@@ -114,7 +138,7 @@ npm start
 npm run float
 ```
 
-悬浮窗会置顶显示 `logs/gmvmax-plan-records.csv` 中最新一轮数据，并每 30 秒刷新一次。
+备用悬浮窗会置顶显示 `logs/gmvmax-plan-records.csv` 中最新一轮数据，并每 30 秒刷新一次。
 
 ## Windows 开机/登录后自动运行
 
@@ -159,6 +183,7 @@ TikTok Ads 后台页面可能会变动。如果字段识别失败，脚本会在
 
 - Chrome 启动命令改为 Windows PowerShell 脚本。
 - 默认 Chrome profile 改为 `chrome-profile-win` / `%USERPROFILE%\.gmvmax-chrome-win`。
+- 屏幕面板使用 `scripts\start-dashboard-win.bat` 或 `npm run dashboard` 打开。
 - 后台常驻方式改为 Windows Task Scheduler，而不是 macOS launchd。
 - Python 悬浮窗字体改为 Windows 常用的 `Segoe UI`。
 - README、路径、命令全部改为 Windows 11 写法。
