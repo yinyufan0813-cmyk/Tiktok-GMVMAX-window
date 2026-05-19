@@ -8,6 +8,8 @@
     "start": "node src/monitor.js",
     "once": "node src/monitor.js --once",
     "list-tabs": "node src/monitor.js --list-tabs",
+    "dashboard": "powershell -ExecutionPolicy Bypass -File scripts/start-dashboard-win.ps1",
+    "dashboard:server": "node src/dashboard-server.js",
     "start:chrome": "powershell -ExecutionPolicy Bypass -File scripts/start-chrome-win.ps1",
     "float": "python scripts/gmvmax_float.py",
     "register-startup": "powershell -ExecutionPolicy Bypass -File scripts/register-startup-task.ps1",
