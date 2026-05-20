@@ -29,7 +29,8 @@ const DEFAULT_CONFIG = {
     newSpend: "",
     newOrderAmount: "",
     totalSpend: "",
-    totalOrderAmount: ""
+    totalOrderAmount: "",
+    totalBudget: ""
   }
 };
 
@@ -37,7 +38,8 @@ const LABELS = {
   newSpend: ["新增消耗", "New spend", "Additional spend"],
   newOrderAmount: ["新增成交金额", "新增成交额", "New GMV", "New revenue"],
   totalSpend: ["总消耗", "Total spend", "Cost"],
-  totalOrderAmount: ["总成交金额", "总成交额", "Total GMV", "Total revenue", "Gross revenue"]
+  totalOrderAmount: ["总成交金额", "总成交额", "Total GMV", "Total revenue", "Gross revenue"],
+  totalBudget: ["总预算", "Total budget"]
 };
 
 main().catch((error) => {
@@ -94,6 +96,7 @@ function mergeConfig(base, override) {
     ...base,
     ...override,
     url: envUrl || override.url || base.url,
+    outputDir: process.env.GMVMAX_OUTPUT_DIR || override.outputDir || base.outputDir,
     tabMatch: { ...base.tabMatch, ...(override.tabMatch || {}) },
     selectors: { ...base.selectors, ...(override.selectors || {}) }
   };
@@ -365,7 +368,8 @@ async function collectOnce(page, config, outputDir) {
         newSpend: firstText(selectors.newSpend, row),
         newOrderAmount: firstText(selectors.newOrderAmount, row),
         totalSpend: firstText(selectors.totalSpend, row),
-        totalOrderAmount: firstText(selectors.totalOrderAmount, row)
+        totalOrderAmount: firstText(selectors.totalOrderAmount, row),
+        totalBudget: firstText(selectors.totalBudget, row)
       }));
     }
 
@@ -387,6 +391,7 @@ async function collectOnce(page, config, outputDir) {
             account,
             name,
             totalSpend: moneyText(values[2]),
+            totalBudget: moneyText(values[3]),
             netSpend: moneyText(values[4]),
             totalOrderAmount: moneyText(values[5])
           };
@@ -430,6 +435,7 @@ async function collectOnce(page, config, outputDir) {
           name: planName,
           netSpend: moneyText(values[grossRevenueIndex - 1]),
           totalSpend: moneyText(values[2]),
+          totalBudget: moneyText(values[3]),
           totalOrderAmount: moneyText(values[grossRevenueIndex])
         });
       }
@@ -552,11 +558,25 @@ async function appendCsv(filePath, result) {
 
 async function appendPlanCsv(filePath, result) {
   const exists = await fileExists(filePath);
-  if (!exists) await fs.appendFile(filePath, "timestamp,account,campaign,interval_spend_increase,interval_order_amount_increase,total_spend,total_order_amount,net_spend,url\n", "utf8");
+  if (!exists) {
+    await fs.appendFile(filePath, "timestamp,account,campaign,interval_spend_increase,interval_order_amount_increase,total_spend,total_order_amount,net_spend,url,total_budget\n", "utf8");
+  } else {
+    await ensurePlanCsvHasBudgetColumn(filePath);
+  }
   for (const plan of result.plans || []) {
-    const row = [result.timestamp, plan.account, plan.name, plan.intervalSpendIncrease, plan.intervalOrderAmountIncrease, plan.totalSpend, plan.totalOrderAmount, plan.netSpend, result.url].map(csvCell);
+    const row = [result.timestamp, plan.account, plan.name, plan.intervalSpendIncrease, plan.intervalOrderAmountIncrease, plan.totalSpend, plan.totalOrderAmount, plan.netSpend, result.url, plan.totalBudget].map(csvCell);
     await fs.appendFile(filePath, `${row.join(",")}\n`, "utf8");
   }
+}
+
+async function ensurePlanCsvHasBudgetColumn(filePath) {
+  const content = await fs.readFile(filePath, "utf8");
+  const lineEndIndex = content.indexOf("\n");
+  const header = lineEndIndex === -1 ? content : content.slice(0, lineEndIndex);
+  if (header.split(",").includes("total_budget")) return;
+
+  const rest = lineEndIndex === -1 ? "" : content.slice(lineEndIndex);
+  await fs.writeFile(filePath, `${header},total_budget${rest}`, "utf8");
 }
 
 async function fileExists(filePath) {
