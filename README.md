@@ -76,6 +76,8 @@ scripts\start-chrome-win.bat
 http://127.0.0.1:9222
 ```
 
+启动脚本会优先打开 `$env:GMVMAX_URL`，其次读取 `config.json` 的 `url`。如果两者都没有配置，则只打开 TikTok Ads 首页，避免把包含广告账号或店铺 ID 的 Dashboard URL 写进仓库。
+
 ### 2. 在新 Chrome 窗口中登录 TikTok Ads
 
 打开你的 TikTok GMV Max 页面并完成登录。
@@ -129,6 +131,21 @@ http://127.0.0.1:8787/dashboard.html
 ```
 
 页面每 30 秒读取一次 `logs/gmvmax-plan-records.csv`，右上角会显示带日期的最新更新时间。
+
+如果需要通过 Tailscale Funnel 暴露手机面板，可以运行：
+
+```powershell
+npm run mobile:funnel
+```
+
+可选环境变量：
+
+```powershell
+$env:GMVMAX_MOBILE_PORT = "8788"
+$env:GMVMAX_TAILSCALE_HOSTNAME = "your-hostname"
+```
+
+公开访问地址以 `tailscale funnel status` 输出为准。
 
 ## 备用 Tk 悬浮窗
 
