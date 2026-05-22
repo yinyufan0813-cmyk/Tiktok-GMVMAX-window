@@ -52,10 +52,20 @@ export function extractGmvMaxRecord({ labels, selectors }) {
       .map((rowText, index) => {
         const values = Array.from(rowText.matchAll(/([\d,]+(?:\.\d+)?)\s+MYR/g)).map((item) => parseNumber(item[1]));
         if (values.length < 6) return null;
+
         const activeMatch = rowText.match(/\s(?:Active|已生效)\s/);
         const name = activeMatch?.index > 0 ? rowText.slice(0, activeMatch.index).trim() : `live-plan-${index + 1}`;
         const account = rowText.match(/\d+\s+(?:recommendations?|条建议)\s+(.*?)\s+ID:/i)?.[1]?.trim() || null;
-        return { index: index + 1, account, name, totalSpend: moneyText(values[2]), totalBudget: moneyText(values[3]), netSpend: moneyText(values[4]), totalOrderAmount: moneyText(values[5]) };
+
+        return {
+          index: index + 1,
+          account,
+          name,
+          totalSpend: moneyText(values[2]),
+          totalBudget: moneyText(values[3]),
+          netSpend: moneyText(values[4]),
+          totalOrderAmount: moneyText(values[5])
+        };
       })
       .filter(Boolean);
   }
@@ -92,7 +102,15 @@ export function extractGmvMaxRecord({ labels, selectors }) {
       const grossRevenueIndex = values.length >= 7 ? values.length - 5 : values.length - 4;
       const planName = rowText.match(/^(.*?)\s+(?:Active|已生效)\s+/)?.[1] || `live-plan-${rows.length + 1}`;
       const account = rowText.match(/(?:recommendations?|条建议)\s+(.*?)\s+ID:/i)?.[1]?.trim() || rowText.match(/Available TikTok accounts\s+(.*?)\s+ID:/i)?.[1]?.trim() || null;
-      rows.push({ index: rows.length + 1, account, name: planName, netSpend: moneyText(values[grossRevenueIndex - 1]), totalSpend: moneyText(values[2]), totalBudget: moneyText(values[3]), totalOrderAmount: moneyText(values[grossRevenueIndex]) });
+      rows.push({
+        index: rows.length + 1,
+        account,
+        name: planName,
+        netSpend: moneyText(values[grossRevenueIndex - 1]),
+        totalSpend: moneyText(values[2]),
+        totalBudget: moneyText(values[3]),
+        totalOrderAmount: moneyText(values[grossRevenueIndex])
+      });
     }
     return rows;
   }
@@ -116,7 +134,10 @@ export function extractGmvMaxRecord({ labels, selectors }) {
       totalBudget: labelMetrics.totalBudget || parsedPlans.find((plan) => plan.totalBudget)?.totalBudget || null
     },
     plans: parsedPlans,
-    pageState: { hasSystemError: /System error|No campaigns found/i.test(bodyText), planCount: parsedPlans.length },
+    pageState: {
+      hasSystemError: /System error|No campaigns found/i.test(bodyText),
+      planCount: parsedPlans.length
+    },
     bodyText
   };
 }
