@@ -4,7 +4,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
 $port = if ($env:GMVMAX_MOBILE_PORT) { $env:GMVMAX_MOBILE_PORT } else { "8788" }
-$hostname = $env:GMVMAX_TAILSCALE_HOSTNAME
+$hostname = if ($env:GMVMAX_TAILSCALE_HOSTNAME) { $env:GMVMAX_TAILSCALE_HOSTNAME } else { "youmigmvmax2" }
 $tailscale = "tailscale"
 
 if (-not (Get-Command $tailscale -ErrorAction SilentlyContinue)) {
@@ -22,13 +22,13 @@ if (-not $existingServer) {
   Start-Sleep -Seconds 3
 }
 
-if ($hostname) {
-  & $tailscale up --hostname=$hostname
-} else {
-  & $tailscale up
-}
-& $tailscale funnel --bg --yes $port
+& $tailscale up --hostname=$hostname
+& $tailscale serve reset
+& $tailscale funnel reset
+& $tailscale funnel --bg --yes --https=443 $port
 
 Write-Host ""
 Write-Host "Mobile panel is running:"
 & $tailscale funnel status
+Write-Host ""
+Write-Host "Public URL: https://$hostname.tail8ecb21.ts.net/"
