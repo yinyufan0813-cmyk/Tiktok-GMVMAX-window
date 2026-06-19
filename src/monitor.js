@@ -8,18 +8,19 @@ import { extractGmvMaxRecord } from "./extract-gmvmax.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PREFIX = "GMVMAX-WIN";
+const DEFAULT_LIVE_GMVMAX_URL = "https://ads.tiktok.com/i18n/gmv-max/dashboard?aadvid=7529709300881686546&is_refresh_page=true&oec_seller_id=7494989238589884894&bc_id=7362608187637366800&activated_tab_id=2&type=live&live_campaign_page=1&live_campaign_page_size=10&list_start_date=1780387920179&list_end_date=1780387920179";
 
 const DEFAULT_CONFIG = {
-  url: "",
+  url: DEFAULT_LIVE_GMVMAX_URL,
   mode: "attach",
   cdpEndpoint: "http://127.0.0.1:9222",
-  intervalMinutes: 10,
+  intervalMinutes: 5,
   headless: false,
   profileDir: "./chrome-profile-win",
   outputDir: "./logs",
   locale: "zh-CN",
   timezoneId: "Asia/Kuala_Lumpur",
-  accountOrder: ["YOUMILIER KLASIK", "YOUMILIER FASHION", "YOUMILIER"],
+  accountOrder: ["YOUMILIER KLASIK", "YOUMILIER FASHION", "YOUMILIER", "YOUMI OOTD"],
   tabMatch: {
     urlIncludes: ["ads.tiktok.com", "gmv-max/dashboard", "type=live"],
     titleIncludes: ["GMV"]
@@ -54,7 +55,7 @@ async function main() {
   const config = await loadConfig();
   const once = args.has("--once");
   const listTabs = args.has("--list-tabs");
-  const intervalMs = Math.max(1, Number(config.intervalMinutes || 10)) * 60 * 1000;
+  const intervalMs = Math.max(1, Number(config.intervalMinutes || 5)) * 60 * 1000;
   const outputDir = resolveProjectPath(config.outputDir);
 
   await fs.mkdir(outputDir, { recursive: true });
@@ -209,6 +210,9 @@ function scorePage({ title, url }, config) {
   const target = safelyParseUrl(targetUrl);
   const current = safelyParseUrl(url);
   let score = 0;
+
+  if (!current || current.host !== "ads.tiktok.com" || !current.pathname.includes("/gmv-max/dashboard")) return 0;
+
   if (target && current && current.host === target.host) score += 4;
   if (target && current && current.pathname === target.pathname) score += 6;
   if (targetUrl && url === targetUrl) score += 20;
@@ -319,9 +323,9 @@ async function collectOnce(page, config, outputDir) {
   const timestamp = new Date().toISOString();
   console.log(`[${PREFIX}] ${timestamp} refreshing dashboard...`);
 
-  const targetUrl = refreshDashboardUrl(page.url(), config.url);
+  const targetUrl = refreshDashboardUrl(config.url, page.url());
   if (targetUrl) {
-    console.log(`[${PREFIX}] Navigating to current LIVE GMV Max window...`);
+    console.log(`[${PREFIX}] Refreshing configured LIVE GMV Max dashboard before extraction...`);
     await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 120_000 }).catch(async () => page.goto(targetUrl));
   } else {
     await page.reload({ waitUntil: "networkidle", timeout: 120_000 });
@@ -340,7 +344,7 @@ async function collectOnce(page, config, outputDir) {
     url: record.url,
     title: record.title,
     liveGmvMax: record.metrics,
-    plans: record.plans,
+    plans: normalizeExtractedPlans(record.plans),
     pageState: record.pageState
   };
 
@@ -355,6 +359,7 @@ async function collectOnce(page, config, outputDir) {
   }
 
   await enrichPlanIncrements(path.join(outputDir, "gmvmax-records.jsonl"), result, config.accountOrder);
+  applyPlanTotals(result);
   await appendJsonl(path.join(outputDir, "gmvmax-records.jsonl"), result);
   await appendCsv(path.join(outputDir, "gmvmax-records.csv"), result);
   await appendPlanCsv(path.join(outputDir, "gmvmax-plan-records.csv"), result);
@@ -394,9 +399,21 @@ async function waitForLivePlans(page, timeoutMs = 60_000) {
 }
 
 async function enrichPlanIncrements(historyPath, result, accountOrder = []) {
+  const allowedAccounts = allowedAccountSet(accountOrder);
   const previous = await readLatestRecordWithPlans(historyPath);
-  const previousByKey = new Map((previous?.plans || []).filter((plan) => plan.account).map((plan) => [plan.account, plan]));
-  const currentKeys = new Set((result.plans || []).map((plan) => plan.account).filter(Boolean));
+  fillMissingAccounts(result.plans, previous?.plans || [], accountOrder);
+  result.plans = (result.plans || []).filter((plan) => isAllowedAccount(plan.account, allowedAccounts));
+
+  const previousByKey = new Map(
+    (previous?.plans || [])
+      .filter((plan) => plan.account && isAllowedAccount(plan.account, allowedAccounts))
+      .map((plan) => [plan.account, plan])
+  );
+  const currentKeys = new Set(
+    (result.plans || [])
+      .map((plan) => plan.account)
+      .filter((account) => account && isAllowedAccount(account, allowedAccounts))
+  );
 
   if (currentKeys.size > 0) {
     for (const [key, previousPlan] of previousByKey.entries()) {
@@ -422,9 +439,66 @@ async function enrichPlanIncrements(historyPath, result, accountOrder = []) {
   result.liveGmvMax.newOrderAmount = moneyText((result.plans || []).reduce((sum, plan) => sum + parseMoney(plan.intervalOrderAmountIncrease), 0));
 }
 
+function applyPlanTotals(result) {
+  const plans = result.plans || [];
+  if (!plans.length) return;
+  result.liveGmvMax.totalSpend = moneyText(plans.reduce((sum, plan) => sum + parseMoney(plan.totalSpend), 0));
+  result.liveGmvMax.totalOrderAmount = moneyText(plans.reduce((sum, plan) => sum + parseMoney(plan.totalOrderAmount), 0));
+  const totalBudget = plans.reduce((sum, plan) => sum + parseMoney(plan.totalBudget), 0);
+  if (totalBudget > 0) result.liveGmvMax.totalBudget = moneyText(totalBudget);
+}
+
+function normalizeExtractedPlans(plans = []) {
+  return plans.map((plan) => {
+    const normalized = { ...plan };
+    const extractedRevenue = parseMoney(normalized.totalBudget);
+    const extractedBudget = parseMoney(normalized.netSpend);
+    const extractedNetSpend = parseMoney(normalized.totalOrderAmount);
+    const totalSpend = parseMoney(normalized.totalSpend);
+
+    if (
+      extractedBudget > 0 &&
+      extractedRevenue > 0 &&
+      extractedNetSpend > 0 &&
+      extractedBudget >= totalSpend &&
+      extractedBudget >= extractedRevenue &&
+      extractedRevenue > extractedNetSpend
+    ) {
+      normalized.totalOrderAmount = normalized.totalBudget;
+      normalized.totalBudget = normalized.netSpend;
+      normalized.netSpend = plan.totalOrderAmount;
+    }
+
+    return normalized;
+  });
+}
+
+function fillMissingAccounts(plans = [], previousPlans = [], accountOrder = []) {
+  const accountByCampaign = new Map(
+    previousPlans
+      .filter((plan) => plan.name && plan.account)
+      .map((plan) => [plan.name, plan.account])
+  );
+
+  plans.forEach((plan, index) => {
+    if (String(plan.account || "").trim()) return;
+    plan.account = accountByCampaign.get(plan.name) || accountOrder[index] || `live-plan-${index + 1}`;
+  });
+}
+
 function accountRank(account, accountOrder = []) {
   const index = accountOrder.indexOf(account);
   return index === -1 ? accountOrder.length : index;
+}
+
+function allowedAccountSet(accountOrder = []) {
+  const accounts = accountOrder.map((account) => String(account || "").trim()).filter(Boolean);
+  return accounts.length ? new Set(accounts) : null;
+}
+
+function isAllowedAccount(account, allowedAccounts) {
+  if (!allowedAccounts) return true;
+  return allowedAccounts.has(String(account || "").trim());
 }
 
 async function readLatestRecordWithPlans(filePath) {
@@ -433,7 +507,7 @@ async function readLatestRecordWithPlans(filePath) {
     const lines = content.trim().split("\n").filter(Boolean);
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       const record = JSON.parse(lines[index]);
-      if (Array.isArray(record.plans) && record.plans.length > 0) return record;
+      if (Array.isArray(record.plans) && record.plans.some((plan) => plan.account)) return record;
     }
   } catch (error) {
     if (error.code !== "ENOENT") throw error;

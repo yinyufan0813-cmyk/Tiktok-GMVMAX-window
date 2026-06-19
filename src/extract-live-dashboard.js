@@ -1,0 +1,205 @@
+export function extractLiveDashboardMetrics(config = {}) {
+  const textOf = (node) => (node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
+  const bodyText = textOf(document.body);
+  const selectors = config.selectors || {};
+  const keyMetricText = keyMetricCardText();
+
+  function firstText(selector) {
+    if (!selector) return null;
+    const node = document.querySelector(selector);
+    return node ? textOf(node) : null;
+  }
+
+  function valueFromSelector(key) {
+    return firstText(selectors[key]);
+  }
+
+  function valueAfterLabel(labelOptions, valuePattern = "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*(?:K|M|%)?", sourceText = keyMetricText) {
+    if (!sourceText) return null;
+    const labels = Array.isArray(labelOptions) ? labelOptions : [labelOptions];
+    for (const label of labels) {
+      const escaped = escapeRegExp(label).replace(/\s+/g, "\\s+");
+      const pattern = new RegExp(`${escaped}\\s*[:：]?\\s*(${valuePattern})`, "i");
+      const match = sourceText.match(pattern);
+      if (match?.[1]) return match[1].trim();
+    }
+
+    return null;
+
+    const all = Array.from(document.querySelectorAll("body *"));
+    for (const node of all) {
+      const ownText = textOf(node);
+      if (!ownText || ownText.length > 180) continue;
+      if (!labels.some((label) => ownText.toLowerCase().includes(label.toLowerCase()))) continue;
+
+      const local = ownText.match(new RegExp(`(${valuePattern})`, "i"));
+      if (local?.[1] && !labels.some((label) => local[1].toLowerCase().includes(label.toLowerCase()))) {
+        return local[1].trim();
+      }
+
+      const parent = node.parentElement;
+      const siblings = parent ? Array.from(parent.children) : [];
+      const index = siblings.indexOf(node);
+      const candidates = siblings.slice(index + 1, index + 5).concat(parent ? Array.from(parent.querySelectorAll("*")).slice(0, 12) : []);
+      for (const candidate of candidates) {
+        const candidateText = textOf(candidate);
+        if (!candidateText || candidateText.length > 80) continue;
+        const match = candidateText.match(new RegExp(`^\\s*(${valuePattern})\\s*$`, "i")) || candidateText.match(new RegExp(`(${valuePattern})`, "i"));
+        if (match?.[1]) return match[1].trim();
+      }
+    }
+    return null;
+  }
+
+  function titleFromPage() {
+    const selectorTitle = firstText(selectors.roomName);
+    if (selectorTitle) return selectorTitle;
+    const handle = bodyText.match(/@[A-Za-z0-9._-]+/)?.[0];
+    if (handle) return handle;
+    const title = document.title.replace(/\s*[-|]\s*TikTok.*$/i, "").trim();
+    return title || location.href;
+  }
+
+  function keyMetricCardText() {
+    const cards = Array.from(document.querySelectorAll("div"))
+      .map((node) => ({ node, text: textOf(node), rect: node.getBoundingClientRect() }))
+      .filter((item) =>
+        item.text.includes("Attributed GMV") &&
+        (item.text.includes("Current viewers") || item.text.includes("Viewers")) &&
+        item.rect.width > 500 &&
+        item.rect.height > 220
+      )
+      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+    return cards[0]?.text || "";
+  }
+
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function extractPlainTapThroughRate(text = keyMetricText) {
+    if (!text) return null;
+    const matches = Array.from(text.matchAll(/Tap-through rate\s+([-+]?\d[\d,.]*(?:\.\d+)?\s*%)/gi));
+    if (matches.length === 0) return null;
+    const plain = matches.find((match) => {
+      const start = Math.max(0, match.index - 32);
+      const before = text.slice(start, match.index).toLowerCase();
+      return !before.includes("via live preview") && !before.includes("via liv");
+    });
+    return (plain || matches.at(-1))?.[1]?.trim() || null;
+  }
+
+  function valueBetweenLabels(label, nextLabel, valuePattern = "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*(?:K|M|%)?", sourceText = keyMetricText) {
+    if (!sourceText) return null;
+    const labelPattern = escapeRegExp(label).replace(/\s+/g, "\\s+");
+    const nextPattern = escapeRegExp(nextLabel).replace(/\s+/g, "\\s+");
+    const pattern = new RegExp(`${labelPattern}\\s+(${valuePattern})\\s+${nextPattern}`, "i");
+    return sourceText.match(pattern)?.[1]?.trim() || null;
+  }
+
+  function looseValueBetweenLabels(label, nextLabel, sourceText = keyMetricText) {
+    if (!sourceText) return null;
+    const labelIndex = sourceText.toLowerCase().indexOf(label.toLowerCase());
+    if (labelIndex < 0) return null;
+    const nextIndex = sourceText.toLowerCase().indexOf(nextLabel.toLowerCase(), labelIndex + label.length);
+    const slice = sourceText.slice(labelIndex + label.length, nextIndex > labelIndex ? nextIndex : undefined);
+    const matches = Array.from(slice.matchAll(/[-+]?\d[\d\s,.]*(?:K|M)?/gi))
+      .map((match) => match[0].replace(/\s+/g, "").trim())
+      .filter(Boolean);
+    return matches.at(-1) || null;
+  }
+
+  function directValueAfterLabel(labelOptions, nextLabelOptions = [], valuePattern = "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*(?:K|M|%)?", sourceText = keyMetricText) {
+    if (!sourceText) return null;
+    const labels = Array.isArray(labelOptions) ? labelOptions : [labelOptions];
+    const nextLabels = Array.isArray(nextLabelOptions) ? nextLabelOptions : [nextLabelOptions];
+    const nextPattern = nextLabels.filter(Boolean).map((label) => escapeRegExp(label).replace(/\s+/g, "\\s+")).join("|");
+
+    for (const label of labels) {
+      const escaped = escapeRegExp(label).replace(/\s+/g, "\\s+");
+      const bounded = nextPattern
+        ? new RegExp(`${escaped}\\s*[:：]?\\s*(${valuePattern})(?=\\s+(?:${nextPattern})|\\s*$)`, "i")
+        : new RegExp(`${escaped}\\s*[:：]?\\s*(${valuePattern})`, "i");
+      const match = sourceText.match(bounded);
+      if (match?.[1]) return match[1].trim();
+    }
+
+    return null;
+
+    const all = Array.from(document.querySelectorAll("body *"));
+    for (const node of all) {
+      const ownText = textOf(node);
+      if (!ownText || ownText.length > 120) continue;
+      const matchedLabel = labels.find((label) => ownText.toLowerCase() === label.toLowerCase() || ownText.toLowerCase().startsWith(`${label.toLowerCase()} `));
+      if (!matchedLabel) continue;
+      if (matchedLabel.toLowerCase() === "tap-through rate" && /\(via\s+live/i.test(ownText)) continue;
+
+      const localText = ownText.slice(matchedLabel.length).trim();
+      const localMatch = localText.match(new RegExp(`^\\s*(${valuePattern})\\s*$`, "i"));
+      if (localMatch?.[1]) return localMatch[1].trim();
+
+      const parent = node.parentElement;
+      const siblings = parent ? Array.from(parent.children) : [];
+      const index = siblings.indexOf(node);
+      const candidates = [
+        node.nextElementSibling,
+        ...siblings.slice(index + 1, index + 4),
+        ...(parent ? Array.from(parent.querySelectorAll("*")).slice(0, 16) : [])
+      ].filter(Boolean);
+
+      for (const candidate of candidates) {
+        if (candidate === node) continue;
+        const candidateText = textOf(candidate);
+        if (!candidateText || candidateText.length > 40 || labels.some((label) => candidateText.toLowerCase().includes(label.toLowerCase()))) continue;
+        const match = candidateText.match(new RegExp(`^\\s*(${valuePattern})\\s*$`, "i"));
+        if (match?.[1]) return match[1].trim();
+      }
+    }
+    return null;
+  }
+
+  const currentViewers =
+    valueFromSelector("currentViewers") ||
+    valueBetweenLabels("Current viewers", "Impressions", "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*(?:K|M)?") ||
+    valueAfterLabel(["Current viewers", "Current viewer", "实时在线人数", "当前观看人数"], "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*(?:K|M)?");
+
+  const attributedGmv =
+    valueFromSelector("attributedGmv") ||
+    looseValueBetweenLabels("Attributed GMV (RM)", "Attributed items sold") ||
+    looseValueBetweenLabels("Attributed GMV", "Attributed items sold");
+
+  const tapThroughRateViaLivePreview =
+    valueFromSelector("tapThroughRateViaLivePreview") ||
+    valueAfterLabel(["Tap-through rate (via LIVE preview)", "Tap-through rate (via LIVE pre...", "Tap-through rate (via LIV"], "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*%");
+
+  const tapThroughRate =
+    valueFromSelector("tapThroughRate") ||
+    directValueAfterLabel(["Tap-through rate", "商品点击率"], ["LIVE CTR", "Order rate", "Ads Cost"], "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*%") ||
+    extractPlainTapThroughRate(keyMetricText);
+
+  const adsCost =
+    valueFromSelector("adsCost") ||
+    valueBetweenLabels("Ads Cost", "GMV Max ROI", "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*(?:K|M|MYR|RM)?") ||
+    valueAfterLabel(["Ads Cost", "Ad Cost", "广告消耗"], "[-+]?\\d[\\d,.]*(?:\\.\\d+)?\\s*(?:K|M|MYR|RM)?");
+
+  const gmvMaxRoi =
+    valueFromSelector("gmvMaxRoi") ||
+    directValueAfterLabel(["GMV Max ROI", "GMV MAX ROI"], ["AOV", "Payment Rate", "Ads Cost", "GMV per hour", "Avg. viewing duration per view", "Comment rate", "Follow rate", "Like rate", "> 1 min. views"], "[-+]?\\d[\\d,.]*(?:\\.\\d+)?");
+
+  return {
+    url: location.href,
+    title: document.title,
+    roomName: titleFromPage(),
+    metrics: {
+      currentViewers,
+      attributedGmv,
+      tapThroughRateViaLivePreview,
+      tapThroughRate,
+      liveCtr: valueFromSelector("liveCtr") || valueBetweenLabels("LIVE CTR", "Ads Cost") || valueAfterLabel(["LIVE CTR", "Live CTR"]),
+      orderRateSkuOrders: valueFromSelector("orderRateSkuOrders") || valueBetweenLabels("Order rate (SKU orders)", "GMV per hour") || valueAfterLabel(["Order rate (SKU orders)", "Order rate", "SKU orders"]),
+      adsCost,
+      gmvMaxRoi
+    },
+    bodyText
+  };
+}

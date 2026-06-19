@@ -8,7 +8,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const port = Number(process.env.GMVMAX_MOBILE_PORT || 8788);
 const host = process.env.GMVMAX_MOBILE_HOST || "0.0.0.0";
-const csvPath = path.join(rootDir, "logs", "gmvmax-plan-records.csv");
+const accessToken = process.env.GMVMAX_MOBILE_TOKEN || "";
+const gmvCsvPath = path.join(rootDir, "logs", "gmvmax-plan-records.csv");
+const liveCsvPath = path.join(rootDir, "logs", "live-room-records.csv");
+const accountOrder = ["YOUMILIER KLASIK", "YOUMILIER FASHION", "YOUMILIER", "YOUMI OOTD"];
 
 const staticFiles = {
   "/": { file: "mobile.html", type: "text/html; charset=utf-8" },
@@ -59,6 +62,14 @@ function numberFromMoney(value) {
   return match ? Number(match[0]) : 0;
 }
 
+function numberFromMetric(value) {
+  const text = String(value || "").replaceAll(",", "").trim();
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return 0;
+  const multiplier = /m\b/i.test(text) ? 1_000_000 : /k\b/i.test(text) ? 1_000 : 1;
+  return Number(match[0]) * multiplier;
+}
+
 function roi(orderAmount, spend) {
   return spend ? orderAmount / spend : null;
 }
@@ -73,12 +84,14 @@ function sum(rows, field) {
   return rows.reduce((total, row) => total + numberFromMoney(row[field]), 0);
 }
 
-function buildPayload(rows) {
+function buildGmvPayload(rows) {
+  const allowedAccounts = allowedAccountSet(accountOrder);
+  const scopedRows = rows.filter(row => isAllowedAccount(row.account || row.campaign, allowedAccounts));
   const timestamps = [...new Set(rows.map(row => row.timestamp).filter(Boolean))];
   const currentTs = timestamps.at(-1) || null;
   const previousTs = timestamps.at(-2) || null;
-  const currentRows = rows.filter(row => row.timestamp === currentTs);
-  const previousRows = rows.filter(row => row.timestamp === previousTs);
+  const currentRows = scopedRows.filter(row => row.timestamp === currentTs);
+  const previousRows = scopedRows.filter(row => row.timestamp === previousTs);
   const previousByAccount = new Map(previousRows.map(row => [row.account || row.campaign, row]));
 
   const accounts = currentRows.map((row, index) => {
@@ -134,9 +147,155 @@ function buildPayload(rows) {
   };
 }
 
+function allowedAccountSet(accounts = []) {
+  const normalized = accounts.map((account) => String(account || "").trim()).filter(Boolean);
+  return normalized.length ? new Set(normalized) : null;
+}
+
+function isAllowedAccount(account, allowedAccounts) {
+  if (!allowedAccounts) return true;
+  return allowedAccounts.has(String(account || "").trim());
+}
+
+function buildLivePayload(rows) {
+  const { currentTs, previousTs, currentRows, previousByRoom } = latestLiveRowsByRoom(rows);
+
+  const rooms = currentRows.map((row, index) => {
+    const key = liveRowKey(row) || `直播间 ${index + 1}`;
+    const previous = previousByRoom.get(key) || {};
+    return {
+      room: displayLiveRoomName(row, index),
+      currentViewers: metric(numberFromMetric(row.current_viewers), numberFromMetric(previous.current_viewers)),
+      tapThroughRateViaLivePreview: metric(numberFromMetric(row.tap_through_rate_via_live_preview), numberFromMetric(previous.tap_through_rate_via_live_preview)),
+      tapThroughRate: metric(numberFromMetric(row.tap_through_rate), numberFromMetric(previous.tap_through_rate)),
+      liveCtr: metric(numberFromMetric(row.live_ctr), numberFromMetric(previous.live_ctr)),
+      orderRateSkuOrders: metric(numberFromMetric(row.order_rate_sku_orders), numberFromMetric(previous.order_rate_sku_orders)),
+      adsCost: metric(numberFromMetric(row.ads_cost), numberFromMetric(previous.ads_cost)),
+      gmvMaxRoi: metric(numberFromMetric(row.gmv_max_roi), numberFromMetric(previous.gmv_max_roi))
+    };
+  });
+
+  const currentViewers = currentRows.reduce((total, row) => total + numberFromMetric(row.current_viewers), 0);
+  const previousRows = Array.from(previousByRoom.values());
+  const previousViewers = previousRows.reduce((total, row) => total + numberFromMetric(row.current_viewers), 0);
+  const adsCost = currentRows.reduce((total, row) => total + numberFromMetric(row.ads_cost), 0);
+  const previousAdsCost = previousRows.reduce((total, row) => total + numberFromMetric(row.ads_cost), 0);
+  const avgRoi = average(currentRows, "gmv_max_roi");
+  const previousAvgRoi = average(previousRows, "gmv_max_roi");
+
+  return {
+    updatedAt: currentTs,
+    previousAt: previousTs,
+    roomCount: rooms.length,
+    summary: {
+      currentViewers: metric(currentViewers, previousViewers),
+      adsCost: metric(adsCost, previousAdsCost),
+      avgRoi: metric(avgRoi, previousAvgRoi)
+    },
+    rooms
+  };
+}
+
+function latestLiveRowsByRoom(rows) {
+  const timestamps = [...new Set(rows.map(row => row.timestamp).filter(Boolean))];
+  const groups = timestamps.map(timestamp => ({
+    timestamp,
+    rows: dedupeLiveRows(rows.filter(row => row.timestamp === timestamp))
+  }));
+  const recentGroups = groups.slice(-6);
+  const expectedRoomCount = recentGroups.reduce((max, group) => Math.max(max, group.rows.length), 0);
+  const byRoom = new Map();
+
+  for (let index = recentGroups.length - 1; index >= 0; index -= 1) {
+    for (const row of recentGroups[index].rows) {
+      const key = liveRowKey(row);
+      if (key && !byRoom.has(key)) byRoom.set(key, row);
+    }
+    if (byRoom.size >= expectedRoomCount) break;
+  }
+
+  const currentRows = Array.from(byRoom.values());
+  const currentTs = timestamps.at(-1) || null;
+  const previousTs = timestamps.at(-2) || null;
+  const previousByRoom = previousLiveRowsByRoom(rows, currentRows);
+  return { currentTs, previousTs, currentRows, previousByRoom };
+}
+
+function previousLiveRowsByRoom(rows, currentRows) {
+  const currentByRoom = new Map(currentRows.map(row => [liveRowKey(row), row]));
+  const previousByRoom = new Map();
+  for (const row of rows) {
+    const key = liveRowKey(row);
+    const current = currentByRoom.get(key);
+    if (!current || !row.timestamp || row.timestamp >= current.timestamp) continue;
+    previousByRoom.set(key, row);
+  }
+  return previousByRoom;
+}
+
+function dedupeLiveRows(rows) {
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = liveRowKey(row);
+    const existing = byKey.get(key);
+    if (!existing || liveRowScore(row) > liveRowScore(existing)) {
+      byKey.set(key, row);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+function liveRowKey(row) {
+  return roomIdFromUrl(row.url) || row.room || row.url || "";
+}
+
+function roomIdFromUrl(value = "") {
+  try {
+    return new URL(value).searchParams.get("room_id") || "";
+  } catch {
+    return "";
+  }
+}
+
+function displayLiveRoomName(row, index) {
+  if (row.room && !/^room-\d+/i.test(row.room)) return row.room;
+  return row.room || `直播间 ${index + 1}`;
+}
+
+function liveRowScore(row) {
+  let score = 0;
+  if (row.room && !/^room-\d+/i.test(row.room)) score += 10;
+  for (const field of ["current_viewers", "tap_through_rate_via_live_preview", "tap_through_rate", "live_ctr", "order_rate_sku_orders", "ads_cost", "gmv_max_roi"]) {
+    if (row[field]) score += 1;
+  }
+  return score;
+}
+
+function average(rows, field) {
+  const values = rows.map(row => numberFromMetric(row[field])).filter(value => Number.isFinite(value));
+  if (!values.length) return 0;
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+async function readRows(filePath) {
+  try {
+    return parseCsv(await fs.readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 async function latestData() {
-  const text = await fs.readFile(csvPath, "utf8");
-  return buildPayload(parseCsv(text));
+  const [gmvRows, liveRows] = await Promise.all([
+    readRows(gmvCsvPath),
+    readRows(liveCsvPath)
+  ]);
+  return {
+    checkedAt: new Date().toISOString(),
+    gmv: buildGmvPayload(gmvRows),
+    live: buildLivePayload(liveRows)
+  };
 }
 
 function localUrls() {
@@ -151,10 +310,32 @@ function localUrls() {
   return urls;
 }
 
+function isAuthorized(request, url) {
+  if (!accessToken) return true;
+  const provided = url.searchParams.get("token") || "";
+  const bearer = (request.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  return provided === accessToken || bearer === accessToken;
+}
+
+function requiresAuth(pathname) {
+  return pathname === "/" || pathname === "/mobile.html" || pathname === "/api/latest";
+}
+
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host}`);
+  const remote = request.socket.remoteAddress || "";
+  console.log(`[MOBILE] ${new Date().toISOString()} ${remote} ${request.method} ${url.pathname}`);
 
   try {
+    if (requiresAuth(url.pathname) && !isAuthorized(request, url)) {
+      response.writeHead(401, {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store"
+      });
+      response.end("Unauthorized");
+      return;
+    }
+
     if (url.pathname === "/api/latest") {
       const payload = await latestData();
       response.writeHead(200, {
@@ -188,4 +369,5 @@ const server = http.createServer(async (request, response) => {
 server.listen(port, host, () => {
   console.log(`GMV Max mobile app server running on http://127.0.0.1:${port}/`);
   for (const url of localUrls()) console.log(`iPhone URL: ${url}`);
+  if (accessToken) console.log("Mobile access token is enabled.");
 });

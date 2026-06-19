@@ -3,6 +3,8 @@ logs/
 config.json
 chrome-profile-win/
 .env
+.tailscale-state
+.serena/
 *.log
 .DS_Store
 Thumbs.db
